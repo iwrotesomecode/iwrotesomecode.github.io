@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="x-ua-compatible" content="ie=edge" />
+    <title>Noise</title>
+    <meta name="description" content="AudioWorklet noise generators" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Place favicon.ico in the root directory -->
+  </head>
+  <body>
+    <!--[if lt IE 8]>
+      <p class="browserupgrade">
+        You are using an <strong>outdated</strong> browser. Please
+        <a href="http://browsehappy.com/">upgrade your browser</a> to improve
+        your experience.
+      </p>
+    <![endif]-->
+    <button id="audioControl">play</button>
+
+    <div>
+      <input type="range" id="volume" min="0" max="1" step="0.01" value="0.5" />
+      <label for="volume">volume 0.5</label>
+    </div>
+
+    <div>
+      <label for="color">noise color:</label>
+      <select id="color">
+        <option value="pink" selected>pink</option>
+        <option value="brown">brown</option>
+        <option value="white">white</option>
+      </select>
+    </div>
+    <canvas id="scope" width="250" height="100"></canvas>
+    <script>
+      const audioControl = document.getElementById("audioControl");
+      const volume = document.getElementById("volume");
+      const volumeLabel = document.querySelector("label[for=volume]");
+      const color = document.getElementById("color");
+      const canvas = document.getElementById("scope");
+      const canvasContext = canvas.getContext("2d");
+      audioControl.addEventListener("click", Start);
+      let audioContext;
+      let finalGain;
+      let visuals;
+      let worklet;
+
+      function Start() {
+        if (!audioContext) {
+          audioContext = new AudioContext();
+        }
+        audioContext.resume();
+        audioControl.removeEventListener("click", Start);
+        audioControl.addEventListener("click", Stop);
+        audioControl.textContent = "stop";
+        let noiseNode;
+
+        finalGain = new GainNode(audioContext, {
+          gain: parseFloat(volume.value),
+        });
+
+        finalGain.connect(audioContext.destination);
+
+        volume.addEventListener("input", function () {
+          let val = parseFloat(volume.value);
+          finalGain.gain.value = val;
+          volumeLabel.textContent = `volume ${val}`;
+        });
+
+        worklet = URL.createObjectURL(
+          new Blob([generateProcessor()], { type: "application/javascript" }),
+        );
+
+        audioContext.audioWorklet.addModule(worklet).then(() => {
+          function selectProcessor() {
+            switch (color.value) {
+              case "pink":
+                return "pink-noise-processor";
+              case "white":
+                return "white-noise-processor";
+              case "brown":
+                return "brown-noise-processor";
+            }
+          }
+
+          noiseNode = new AudioWorkletNode(audioContext, selectProcessor());
+          noiseNode.connect(finalGain);
+
+          function colorChange() {
+            if (audioContext.state === "running") {
+              noiseNode.disconnect();
+              noiseNode = new AudioWorkletNode(audioContext, selectProcessor());
+              noiseNode.connect(finalGain);
+            }
+          }
+
+          color.addEventListener("change", colorChange);
+        });
+
+        function animate() {
+          const width = canvas.width;
+          const height = canvas.height;
+          const analyser = new AnalyserNode(audioContext, { fftSize: 256 });
+          const bufferLength = analyser.frequencyBinCount;
+          finalGain.connect(analyser);
+
+          const barWidth = (2 * width) / bufferLength;
+          const data = new Uint8Array(bufferLength);
+          analyser.getByteFrequencyData(data);
+
+          canvasContext.clearRect(0, 0, width, height);
+          function drawFrequencyData() {
+            visuals = requestAnimationFrame(drawFrequencyData);
+            analyser.getByteFrequencyData(data);
+            canvasContext.clearRect(0, 0, width, height);
+            let x = 0;
+            for (let i = 0; i < bufferLength; i++) {
+              const barHeight = (data[i] * 2) / 3;
+              canvasContext.fillStyle =
+                "rgb(" + (barHeight + 100) + ", 220, 220)";
+              canvasContext.fillRect(
+                x,
+                height - barHeight / 2,
+                barWidth,
+                barHeight / 2,
+              );
+              x += barWidth;
+            }
+          }
+          drawFrequencyData();
+        }
+
+        animate();
+      }
+
+      function Stop() {
+        audioControl.removeEventListener("click", Stop);
+        audioControl.addEventListener("click", Start);
+        audioControl.textContent = "start";
+        cancelAnimationFrame(visuals);
+        finalGain.disconnect();
+        audioContext.suspend();
+      }
+
+      function generateProcessor() {
+        return `// https://noisehack.com/generate-noise-web-audio-api/
+class WhiteNoiseProcessor extends AudioWorkletProcessor {
+  process(inputs, outputs, parameters) {
+    const output = outputs[0];
+    output.forEach((channel) => {
+      for (let i = 0; i < channel.length; i++) {
+        channel[i] = Math.random() * 2 - 1;
+      }
+    });
+    return true;
+  }
+}
+
+registerProcessor("white-noise-processor", WhiteNoiseProcessor);
+
+class PinkNoiseProcessor extends AudioWorkletProcessor {
+  process(inputs, outputs, parameters) {
+    const output = outputs[0];
+    output.forEach((channel) => {
+      let b0, b1, b2, b3, b4, b5, b6;
+      b0 = b1 = b2 = b3 = b4 = b5 = b6 = 0.0;
+      const sampleCount = channel.length;
+      for (let i = 0; i < sampleCount; i++) {
+        let white = Math.random() * 2 - 1;
+        b0 = 0.99886 * b0 + white * 0.0555179;
+        b1 = 0.99332 * b1 + white * 0.0750759;
+        b2 = 0.969 * b2 + white * 0.153852;
+        b3 = 0.8665 * b3 + white * 0.3104856;
+        b4 = 0.55 * b4 + white * 0.5329522;
+        b5 = -0.7616 * b5 - white * 0.016898;
+        channel[i] = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362;
+        channel[i] *= 0.11; // (roughly) compensate for gain
+        b6 = white * 0.115926;
+      }
+    });
+    // to keep this processor alive
+    return true;
+  }
+}
+
+registerProcessor("pink-noise-processor", PinkNoiseProcessor);
+
+class BrownNoiseProcessor extends AudioWorkletProcessor {
+  process(inputs, outputs, parameters) {
+    const output = outputs[0];
+    output.forEach((channel) => {
+      let lastOut = 0.0;
+      for (let i = 0; i < channel.length; i++) {
+        let white = Math.random() * 2 - 1;
+        channel[i] = (lastOut + 0.02 * white) / 1.02;
+        lastOut = channel[i];
+        channel[i] *= 3.5; // (roughly compensate for gain)
+      }
+    });
+    return true;
+  }
+}
+
+registerProcessor("brown-noise-processor", BrownNoiseProcessor);
+`;
+      }
+    </script>
+  </body>
+</html>
